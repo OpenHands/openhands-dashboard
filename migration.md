@@ -22,6 +22,7 @@ Start the app locally and trigger a snapshot manually:
 curl -X POST http://localhost:3000/api/cron/collect \
   -H "Authorization: Bearer $CRON_SECRET"
 ```
+Note: create CRON_SECRET with the command `openssl rand -base64 32`
 
 ## Create a backup
 
