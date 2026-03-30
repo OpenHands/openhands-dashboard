@@ -1,23 +1,11 @@
-const PYPISTATS_API_BASE = 'https://pypistats.org/api';
+const PYPI_CLICKHOUSE_URL = 'https://sql-clickhouse.clickhouse.com/?user=demo';
 
-interface PyPIStatsResponse {
-  data: {
-    last_day: number;
-    last_week: number;
-    last_month: number;
-  };
-  package: string;
-  type: string;
-}
-
-interface PyPIOverallResponse {
-  data: Array<{
-    category: string;
-    date: string;
-    downloads: number;
-  }>;
-  package: string;
-  type: string;
+interface PyPIDownloadsSummaryRow {
+  last_day: string | number;
+  last_week: string | number;
+  last_month: string | number;
+  total: string | number;
+  rows: string | number;
 }
 
 export interface PyPIMetrics {
@@ -28,45 +16,64 @@ export interface PyPIMetrics {
   package: string;
 }
 
-/**
- * Fetch download counts for a PyPI package
- */
-export async function getPyPIDownloads(packageName: string): Promise<PyPIMetrics> {
-  const [recentResponse, overallResponse] = await Promise.all([
-    fetch(`${PYPISTATS_API_BASE}/packages/${encodeURIComponent(packageName)}/recent`, {
-      headers: { 'Accept': 'application/json' },
-    }),
-    fetch(`${PYPISTATS_API_BASE}/packages/${encodeURIComponent(packageName)}/overall`, {
-      headers: { 'Accept': 'application/json' },
-    }),
-  ]);
-  
-  if (recentResponse.status === 404) {
+function escapeClickHouseString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+export function buildPyPIDownloadsQuery(packageName: string): string {
+  const escapedPackageName = escapeClickHouseString(packageName);
+
+  return `
+      SELECT
+        sumIf(count, date = yesterday()) AS last_day,
+        sumIf(count, date >= yesterday() - 6 AND date <= yesterday()) AS last_week,
+        sumIf(count, date >= yesterday() - 29 AND date <= yesterday()) AS last_month,
+        sum(count) AS total,
+        count() AS rows
+      FROM pypi.pypi_downloads_per_day
+      WHERE project = '${escapedPackageName}'
+      FORMAT JSONEachRow
+    `;
+}
+
+export function parsePyPIDownloadsSummary(summaryText: string, packageName: string): PyPIMetrics {
+  const trimmedSummary = summaryText.trim();
+
+  if (!trimmedSummary) {
+    throw new Error('PyPI ClickHouse returned an empty response');
+  }
+
+  const summary = JSON.parse(trimmedSummary) as PyPIDownloadsSummaryRow;
+
+  if (parseInt(String(summary.rows), 10) === 0) {
     throw new Error(`PyPI package not found: ${packageName}`);
   }
-  
-  if (!recentResponse.ok) {
-    throw new Error(`PyPI API error: ${recentResponse.status} ${recentResponse.statusText}`);
-  }
-  
-  const recentData: PyPIStatsResponse = await recentResponse.json();
-  
-  // Calculate all-time downloads (without mirrors to avoid double counting)
-  let allTimeDownloads = 0;
-  if (overallResponse.ok) {
-    const overallData: PyPIOverallResponse = await overallResponse.json();
-    allTimeDownloads = overallData.data
-      .filter(d => d.category === 'without_mirrors')
-      .reduce((sum, d) => sum + d.downloads, 0);
-  }
-  
+
   return {
-    weeklyDownloads: recentData.data.last_week,
-    dailyDownloads: recentData.data.last_day,
-    monthlyDownloads: recentData.data.last_month,
-    allTimeDownloads,
-    package: recentData.package,
+    weeklyDownloads: parseInt(String(summary.last_week), 10),
+    dailyDownloads: parseInt(String(summary.last_day), 10),
+    monthlyDownloads: parseInt(String(summary.last_month), 10),
+    allTimeDownloads: parseInt(String(summary.total), 10),
+    package: packageName,
   };
+}
+
+/**
+ * Fetch download counts for a PyPI package from ClickHouse.
+ */
+export async function getPyPIDownloads(packageName: string): Promise<PyPIMetrics> {
+  const response = await fetch(PYPI_CLICKHOUSE_URL, {
+    method: 'POST',
+    headers: { 'Accept': 'application/json' },
+    body: buildPyPIDownloadsQuery(packageName),
+  });
+
+  if (!response.ok) {
+    throw new Error(`PyPI ClickHouse error: ${response.status} ${response.statusText}`);
+  }
+
+  const summaryText = await response.text();
+  return parsePyPIDownloadsSummary(summaryText, packageName);
 }
 
 /**

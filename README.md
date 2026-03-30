@@ -1,6 +1,6 @@
 # OpenHands Dashboard
 
-A one-time copy of `openhands/sdk-dashboard`, retargeted to track the `OpenHands/OpenHands` GitHub repository and the `openhands-ai` PyPI package.
+A one-time copy of `openhands/sdk-dashboard`, retargeted to track the `OpenHands/OpenHands` GitHub repository and the `openhands-ai` PyPI package. 
 
 ## What this dashboard tracks
 
