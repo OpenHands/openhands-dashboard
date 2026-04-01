@@ -174,7 +174,7 @@ export default async function Home() {
             subtitle={
               storedDependents.date
                 ? `as of ${formatSnapshotDate(storedDependents.date)} · updated daily`
-                : 'updated daily via cron'
+                : 'updated daily via GitHub Actions'
             }
             loading={false}
           />

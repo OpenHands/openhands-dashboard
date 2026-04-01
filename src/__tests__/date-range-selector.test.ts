@@ -90,9 +90,9 @@ describe('date range selector — history API route', () => {
     expect(src).toContain('Invalid period');
   });
 
-  it('returns an empty data set when the database is unavailable', () => {
+  it('returns an empty data set when no snapshots are available yet', () => {
     expect(src).toContain('snapshotCount: 0');
-    expect(src).toContain('Database not available');
+    expect(src).toContain('No historical snapshots available yet');
   });
 
   it('includes startDate and endDate in the response envelope', () => {

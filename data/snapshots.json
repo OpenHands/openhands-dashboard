@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-04-01T16:38:11.645Z",
+  "snapshots": [
+    {
+      "date": "2026-04-01",
+      "githubStars": 70375,
+      "githubForks": 8811,
+      "githubActiveForks": 1234,
+      "githubContributors": 460,
+      "githubRepeatContributors": 167,
+      "githubDependentRepos": null,
+      "npmDownloadsWeekly": null,
+      "pypiDownloadsWeekly": 441056
+    }
+  ]
+}

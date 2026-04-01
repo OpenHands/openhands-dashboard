@@ -1,9 +1,10 @@
-import { getDb } from './db';
-import { trackedRepositories, metricsSnapshots } from './schema';
-import { eq, and, desc } from 'drizzle-orm';
+import { mkdir, readFile, rename, writeFile } from 'fs/promises';
+import path from 'path';
 import { getAllGitHubMetrics, getDependentReposCount } from './github';
 import { getPyPIDownloads } from './pypi';
 import { TARGET_CONFIG } from './target-config';
+
+const SNAPSHOTS_SCHEMA_VERSION = 1;
 
 export interface SnapshotData {
   githubStars: number;
@@ -16,31 +17,162 @@ export interface SnapshotData {
   pypiDownloadsWeekly: number;
 }
 
-export async function getOrCreateTrackedRepository(): Promise<number> {
-  const db = getDb();
-  if (!db) throw new Error('Database not available');
+export interface HistoricalSnapshot extends SnapshotData {
+  date: string;
+}
 
-  const existing = await db
-    .select()
-    .from(trackedRepositories)
-    .where(eq(trackedRepositories.githubRepo, `${TARGET_CONFIG.github.owner}/${TARGET_CONFIG.github.repo}`))
-    .limit(1);
+export interface SnapshotsFile {
+  schemaVersion: number;
+  generatedAt: string | null;
+  snapshots: HistoricalSnapshot[];
+}
 
-  if (existing.length > 0) {
-    return existing[0].id;
+export interface StoredDependentRepos {
+  count: number | null;
+  date: string | null;
+}
+
+export type SaveSnapshotAction = 'created' | 'updated' | 'unchanged';
+
+export function getSnapshotsFilePath(): string {
+  return process.env.SNAPSHOTS_FILE_PATH || path.join(process.cwd(), 'data', 'snapshots.json');
+}
+
+export function normalizeSnapshotDate(date: Date | string): string {
+  if (typeof date === 'string') {
+    return date;
   }
 
-  const result = await db
-    .insert(trackedRepositories)
-    .values({
-      name: TARGET_CONFIG.name,
-      githubRepo: `${TARGET_CONFIG.github.owner}/${TARGET_CONFIG.github.repo}`,
-      npmPackage: null,
-      pypiPackage: TARGET_CONFIG.pypi.package,
-    })
-    .returning({ id: trackedRepositories.id });
+  return date.toISOString().split('T')[0];
+}
 
-  return result[0].id;
+function assertNumberField(name: string, value: unknown, nullable = false): number | null {
+  if (nullable && value === null) {
+    return null;
+  }
+
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    throw new Error(`Invalid snapshot field: ${name}`);
+  }
+
+  return value;
+}
+
+function parseHistoricalSnapshot(value: unknown): HistoricalSnapshot {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Invalid snapshot entry');
+  }
+
+  const snapshot = value as Record<string, unknown>;
+
+  if (typeof snapshot.date !== 'string' || snapshot.date.length === 0) {
+    throw new Error('Invalid snapshot field: date');
+  }
+
+  return {
+    date: snapshot.date,
+    githubStars: assertNumberField('githubStars', snapshot.githubStars) ?? 0,
+    githubForks: assertNumberField('githubForks', snapshot.githubForks) ?? 0,
+    githubActiveForks: assertNumberField('githubActiveForks', snapshot.githubActiveForks) ?? 0,
+    githubContributors: assertNumberField('githubContributors', snapshot.githubContributors) ?? 0,
+    githubRepeatContributors: assertNumberField(
+      'githubRepeatContributors',
+      snapshot.githubRepeatContributors
+    ) ?? 0,
+    githubDependentRepos: assertNumberField(
+      'githubDependentRepos',
+      snapshot.githubDependentRepos,
+      true
+    ),
+    npmDownloadsWeekly: assertNumberField('npmDownloadsWeekly', snapshot.npmDownloadsWeekly, true),
+    pypiDownloadsWeekly: assertNumberField('pypiDownloadsWeekly', snapshot.pypiDownloadsWeekly) ?? 0,
+  };
+}
+
+export function sortSnapshotsDescending(snapshots: HistoricalSnapshot[]): HistoricalSnapshot[] {
+  return [...snapshots].sort((left, right) => right.date.localeCompare(left.date));
+}
+
+export function createEmptySnapshotsFile(): SnapshotsFile {
+  return {
+    schemaVersion: SNAPSHOTS_SCHEMA_VERSION,
+    generatedAt: null,
+    snapshots: [],
+  };
+}
+
+export function parseSnapshotsFile(fileContents: string): SnapshotsFile {
+  if (fileContents.trim().length === 0) {
+    return createEmptySnapshotsFile();
+  }
+
+  const parsed = JSON.parse(fileContents) as Partial<SnapshotsFile>;
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Invalid snapshots file');
+  }
+
+  const snapshots = Array.isArray(parsed.snapshots)
+    ? parsed.snapshots.map((snapshot) => parseHistoricalSnapshot(snapshot))
+    : [];
+
+  return {
+    schemaVersion: SNAPSHOTS_SCHEMA_VERSION,
+    generatedAt: typeof parsed.generatedAt === 'string' ? parsed.generatedAt : null,
+    snapshots: sortSnapshotsDescending(snapshots),
+  };
+}
+
+export async function readSnapshotsFile(): Promise<SnapshotsFile> {
+  try {
+    const fileContents = await readFile(getSnapshotsFilePath(), 'utf8');
+    return parseSnapshotsFile(fileContents);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return createEmptySnapshotsFile();
+    }
+
+    throw error;
+  }
+}
+
+async function writeSnapshotsFile(file: SnapshotsFile): Promise<void> {
+  const filePath = getSnapshotsFilePath();
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.tmp`;
+  const contents = `${JSON.stringify(file, null, 2)}\n`;
+  await writeFile(tempPath, contents, 'utf8');
+  await rename(tempPath, filePath);
+}
+
+export function upsertSnapshot(
+  snapshots: HistoricalSnapshot[],
+  snapshot: HistoricalSnapshot
+): { action: SaveSnapshotAction; snapshots: HistoricalSnapshot[] } {
+  const existingIndex = snapshots.findIndex((entry) => entry.date === snapshot.date);
+
+  if (existingIndex === -1) {
+    return {
+      action: 'created',
+      snapshots: sortSnapshotsDescending([...snapshots, snapshot]),
+    };
+  }
+
+  const existingSnapshot = snapshots[existingIndex];
+  if (JSON.stringify(existingSnapshot) === JSON.stringify(snapshot)) {
+    return {
+      action: 'unchanged',
+      snapshots,
+    };
+  }
+
+  const nextSnapshots = [...snapshots];
+  nextSnapshots[existingIndex] = snapshot;
+
+  return {
+    action: 'updated',
+    snapshots: sortSnapshotsDescending(nextSnapshots),
+  };
 }
 
 export async function collectCurrentMetrics(): Promise<SnapshotData> {
@@ -62,143 +194,75 @@ export async function collectCurrentMetrics(): Promise<SnapshotData> {
   };
 }
 
-export async function hasSnapshotForToday(repositoryId: number): Promise<boolean> {
-  const db = getDb();
-  if (!db) return false;
-
-  const today = new Date().toISOString().split('T')[0];
-  const existing = await db
-    .select({ id: metricsSnapshots.id })
-    .from(metricsSnapshots)
-    .where(
-      and(
-        eq(metricsSnapshots.repositoryId, repositoryId),
-        eq(metricsSnapshots.date, today)
-      )
-    )
-    .limit(1);
-
-  return existing.length > 0;
-}
-
 export async function saveDailySnapshot(
-  repositoryId: number,
   data: SnapshotData,
-  date?: Date
-): Promise<{ isNew: boolean; snapshotId: number | null; skipped: boolean }> {
-  const db = getDb();
-  if (!db) throw new Error('Database not available');
+  date: Date | string = new Date()
+): Promise<{ action: SaveSnapshotAction; snapshot: HistoricalSnapshot }> {
+  const snapshot: HistoricalSnapshot = {
+    date: normalizeSnapshotDate(date),
+    ...data,
+  };
 
-  const snapshotDate = date || new Date();
-  const dateString = snapshotDate.toISOString().split('T')[0];
-  const existing = await db
-    .select({ id: metricsSnapshots.id })
-    .from(metricsSnapshots)
-    .where(
-      and(
-        eq(metricsSnapshots.repositoryId, repositoryId),
-        eq(metricsSnapshots.date, dateString)
-      )
-    )
-    .limit(1);
+  const currentFile = await readSnapshotsFile();
+  const result = upsertSnapshot(currentFile.snapshots, snapshot);
 
-  if (existing.length > 0) {
-    return { isNew: false, snapshotId: existing[0].id, skipped: true };
+  if (result.action !== 'unchanged') {
+    await writeSnapshotsFile({
+      schemaVersion: SNAPSHOTS_SCHEMA_VERSION,
+      generatedAt: new Date().toISOString(),
+      snapshots: result.snapshots,
+    });
   }
-
-  const result = await db
-    .insert(metricsSnapshots)
-    .values({
-      repositoryId,
-      date: dateString,
-      githubStars: data.githubStars,
-      githubForks: data.githubForks,
-      githubActiveForks: data.githubActiveForks,
-      githubContributors: data.githubContributors,
-      githubRepeatContributors: data.githubRepeatContributors,
-      githubDependentRepos: data.githubDependentRepos,
-      npmDownloadsWeekly: data.npmDownloadsWeekly,
-      pypiDownloadsWeekly: data.pypiDownloadsWeekly,
-    })
-    .returning({ id: metricsSnapshots.id });
-
-  return { isNew: true, snapshotId: result[0].id, skipped: false };
-}
-
-export async function collectAndSaveSnapshot(): Promise<{
-  success: boolean;
-  isNew: boolean;
-  skipped: boolean;
-  snapshotId: number | null;
-  date: string;
-}> {
-  const today = new Date();
-  const dateString = today.toISOString().split('T')[0];
-
-  const repositoryId = await getOrCreateTrackedRepository();
-  const alreadyExists = await hasSnapshotForToday(repositoryId);
-  if (alreadyExists) {
-    return {
-      success: true,
-      isNew: false,
-      skipped: true,
-      snapshotId: null,
-      date: dateString,
-    };
-  }
-
-  const metrics = await collectCurrentMetrics();
-  const { isNew, snapshotId, skipped } = await saveDailySnapshot(repositoryId, metrics, today);
 
   return {
-    success: true,
-    isNew,
-    skipped,
-    snapshotId,
-    date: dateString,
+    action: result.action,
+    snapshot,
   };
 }
 
-export async function getHistoricalSnapshots(
-  repositoryId: number,
-  days: number = 30
-): Promise<typeof metricsSnapshots.$inferSelect[]> {
-  const db = getDb();
-  if (!db) return [];
+export async function collectAndSaveSnapshot(
+  date: Date | string = new Date()
+): Promise<{ action: SaveSnapshotAction; date: string; snapshot: HistoricalSnapshot }> {
+  const metrics = await collectCurrentMetrics();
+  const result = await saveDailySnapshot(metrics, date);
 
-  return db
-    .select()
-    .from(metricsSnapshots)
-    .where(eq(metricsSnapshots.repositoryId, repositoryId))
-    .orderBy(desc(metricsSnapshots.date))
-    .limit(days);
+  return {
+    action: result.action,
+    date: result.snapshot.date,
+    snapshot: result.snapshot,
+  };
 }
 
-export async function getLatestSnapshot(
-  repositoryId: number
-): Promise<typeof metricsSnapshots.$inferSelect | null> {
-  const db = getDb();
-  if (!db) return null;
-
-  const result = await db
-    .select()
-    .from(metricsSnapshots)
-    .where(eq(metricsSnapshots.repositoryId, repositoryId))
-    .orderBy(desc(metricsSnapshots.date))
-    .limit(1);
-
-  return result[0] || null;
+export async function getHistoricalSnapshots(days = 30): Promise<HistoricalSnapshot[]> {
+  const { snapshots } = await readSnapshotsFile();
+  const normalizedDays = Number.isFinite(days) ? Math.max(0, Math.floor(days)) : 30;
+  return snapshots.slice(0, normalizedDays);
 }
 
-export interface StoredDependentRepos {
-  count: number | null;
-  date: string | null;
+export function filterSnapshotsByDateRange(
+  snapshots: HistoricalSnapshot[],
+  startDate: string,
+  endDate: string
+): HistoricalSnapshot[] {
+  return snapshots.filter((snapshot) => snapshot.date >= startDate && snapshot.date <= endDate);
+}
+
+export async function getHistoricalSnapshotsInRange(
+  startDate: string,
+  endDate: string
+): Promise<HistoricalSnapshot[]> {
+  const { snapshots } = await readSnapshotsFile();
+  return filterSnapshotsByDateRange(snapshots, startDate, endDate);
+}
+
+export async function getLatestSnapshot(): Promise<HistoricalSnapshot | null> {
+  const { snapshots } = await readSnapshotsFile();
+  return snapshots[0] ?? null;
 }
 
 export async function getStoredDependentRepos(): Promise<StoredDependentRepos> {
   try {
-    const repositoryId = await getOrCreateTrackedRepository();
-    const snapshot = await getLatestSnapshot(repositoryId);
+    const snapshot = await getLatestSnapshot();
     return {
       count: snapshot?.githubDependentRepos ?? null,
       date: snapshot?.date ?? null,

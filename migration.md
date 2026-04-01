@@ -1,42 +1,32 @@
-# Database Setup and Restore Guide
+# Snapshot Data Workflow
 
-This dashboard stores daily snapshots in Postgres. Neon is the recommended provider.
+This dashboard no longer uses Postgres or Neon for historical data. Historical metrics now live in the committed `data/snapshots.json` file.
 
-## Create the schema
+## Local workflow
 
-1. Copy `.env.example` to `.env.local` and set `DATABASE_URL`
-2. Run:
+1. Copy `.env.example` to `.env.local`.
+2. Optionally set `GITHUB_TOKEN` for higher GitHub API limits.
+3. Run:
 
 ```bash
 npm ci
-npm run db:push
+npm run snapshots:update
 ```
 
-That creates the `sdks` and `metrics_snapshots` tables required by the dashboard.
+That command fetches live metrics and upserts the current day in `data/snapshots.json`.
 
-## Verify the database connection
+## Daily automation
 
-Start the app locally and trigger a snapshot manually:
+GitHub Actions updates the snapshot file on a daily schedule and through `workflow_dispatch`.
 
-```bash
-curl -X POST http://localhost:3000/api/cron/collect \
-  -H "Authorization: Bearer $CRON_SECRET"
-```
-Note: create CRON_SECRET with the command `openssl rand -base64 32`
+- Workflow: `.github/workflows/update-snapshots.yml`
+- Schedule: `0 6 * * *`
+- Output: a commit containing the updated `data/snapshots.json` file when metrics changed
 
-## Create a backup
+## Preview verification
 
-```bash
-DATABASE_URL=postgresql://... npm run backup:neon
-```
+Before merging a branch, manually dispatch the workflow on that branch and confirm:
 
-## Restore a backup
-
-```bash
-DATABASE_URL=postgresql://... npm run restore:neon -- backups/openhands-dashboard-<timestamp>.dump
-```
-
-## Tables
-
-- `sdks` — tracked repository/package metadata
-- `metrics_snapshots` — daily historical metrics
+- the workflow succeeds
+- `data/snapshots.json` is updated or intentionally left unchanged
+- the Vercel preview shows the expected chart history

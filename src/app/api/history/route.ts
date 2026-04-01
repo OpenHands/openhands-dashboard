@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
-import { trackedRepositories, metricsSnapshots } from '@/lib/schema';
-import { eq, desc, and, gte } from 'drizzle-orm';
-import { TARGET_CONFIG } from '@/lib/target-config';
+import { getHistoricalSnapshotsInRange } from '@/lib/snapshots';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,16 +21,6 @@ function emptyHistoryResponse(period: number, startDate: string, endDate: string
   });
 }
 
-async function findTrackedRepositoryId(db: NonNullable<ReturnType<typeof getDb>>, githubRepo: string) {
-  const result = await db
-    .select({ id: trackedRepositories.id })
-    .from(trackedRepositories)
-    .where(eq(trackedRepositories.githubRepo, githubRepo))
-    .limit(1);
-
-  return result[0]?.id;
-}
-
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
@@ -46,48 +33,22 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const db = getDb();
     const endDate = new Date();
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - period);
 
     const startDateString = startDate.toISOString().split('T')[0];
     const endDateString = endDate.toISOString().split('T')[0];
+    const snapshots = await getHistoricalSnapshotsInRange(startDateString, endDateString);
 
-    if (!db) {
-      return emptyHistoryResponse(period, startDateString, endDateString, 'Database not available. Please configure DATABASE_URL.');
-    }
-
-    const repoParam = searchParams.get('repo') ?? searchParams.get('sdk');
-    const githubRepo = repoParam || `${TARGET_CONFIG.github.owner}/${TARGET_CONFIG.github.repo}`;
-
-    let repositoryId: number | undefined;
-    try {
-      repositoryId = await findTrackedRepositoryId(db, githubRepo);
-    } catch (dbError) {
-      console.error('Database query error:', dbError);
-      return emptyHistoryResponse(period, startDateString, endDateString, 'Database unavailable or empty.');
-    }
-
-    if (!repositoryId) {
+    if (snapshots.length === 0) {
       return emptyHistoryResponse(
         period,
         startDateString,
         endDateString,
-        'No tracked repository found in the database. Run the cron job to collect the initial snapshot.'
+        'No historical snapshots available yet. The daily GitHub Actions workflow will add data after its first successful run.'
       );
     }
-
-    const snapshots = await db
-      .select()
-      .from(metricsSnapshots)
-      .where(
-        and(
-          eq(metricsSnapshots.repositoryId, repositoryId),
-          gte(metricsSnapshots.date, startDateString)
-        )
-      )
-      .orderBy(desc(metricsSnapshots.date));
 
     return NextResponse.json({
       period,
