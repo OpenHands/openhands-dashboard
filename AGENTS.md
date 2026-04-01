@@ -1,32 +1,33 @@
 # openhands-dashboard — Agent Guide
 
 ## Project Overview
-Next.js 14 + TypeScript dashboard for OpenHands metrics sourced from GitHub, PyPI, and daily stored snapshots.
+Next.js 14 + TypeScript dashboard for OpenHands metrics sourced from GitHub, PyPI, and daily snapshots committed to the repository.
 
 ## Tech Stack
 - **Framework**: Next.js 14 (App Router)
 - **Language**: TypeScript 5
 - **Styling**: Tailwind CSS + shadcn/ui components
-- **Database**: Postgres + Drizzle ORM (Neon recommended)
+- **Historical Storage**: `data/snapshots.json` committed to git
 - **Testing**: Vitest
 - **Linting**: ESLint 8 via `eslint . --ext .ts,.tsx`
 
 ## Key Commands
 ```bash
-npm ci               # Install dependencies from lockfile
-npm run dev          # Start dev server
-npm run build        # Production build
-npm run lint         # Run ESLint on .ts/.tsx files
-npm run lint:fix     # Auto-fix ESLint issues
-npm test             # Run Vitest suite
-npm run backup:neon  # Create a local Postgres dump using DATABASE_URL
+npm ci
+npm run dev
+npm run build
+npm run lint
+npm test
+npm run snapshots:update
 ```
 
 ## Notes
 - Path alias `@/*` maps to `src/*`.
-- `DATABASE_URL` is optional for local test runs; snapshot fallback tests pass without it.
 - The dashboard targets `OpenHands/OpenHands` on GitHub and `openhands-ai` on PyPI.
 - PyPI download metrics are fetched from ClickHouse (`https://sql-clickhouse.clickhouse.com/?user=demo`) against `pypi.pypi_downloads_per_day`, using yesterday-based rolling 1/7/30-day windows to avoid PyPI Stats rate limits.
-- Backup scripts live in `scripts/backup-neon.sh` and `scripts/restore-neon.sh`.
+- Historical metrics and stored dependent-repo counts are read from `data/snapshots.json`; runtime writes were removed.
+- The scheduled writer is `.github/workflows/update-snapshots.yml`, which runs `npm run snapshots:update` and commits `data/snapshots.json` only when it changes.
+- `SNAPSHOTS_FILE_PATH` can override the default snapshot file path for tests or scripts.
+- `next.config.mjs` includes `data/snapshots.json` in output file tracing for deployments.
 - Dashboard data fetching should prefer partial-failure handling (`Promise.allSettled`) so one upstream API outage does not blank the whole page.
 - CI should run `npm run lint` and `npm test` on pull requests and pushes to `main`.

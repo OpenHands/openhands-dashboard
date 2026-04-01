@@ -1,21 +1,21 @@
 # OpenHands Dashboard
 
-A one-time copy of `openhands/sdk-dashboard`, retargeted to track the `OpenHands/OpenHands` GitHub repository and the `openhands-ai` PyPI package. 
+A one-time copy of `openhands/sdk-dashboard`, retargeted to track the `OpenHands/OpenHands` GitHub repository and the `openhands-ai` PyPI package.
 
 ## What this dashboard tracks
 
-- GitHub repository metrics for `OpenHands/OpenHands`
-- PyPI download metrics for `openhands-ai`
-- Daily historical snapshots stored in Postgres
+- Live GitHub repository metrics for `OpenHands/OpenHands`
+- Live PyPI download metrics for `openhands-ai`
+- Historical daily snapshots stored in `data/snapshots.json`
 - Daily dependent-repository counts based on GitHub code search
-- Automated Neon backup artifacts via GitHub Actions
+- Automated snapshot updates via GitHub Actions
 
 ## Tech stack
 
 - **Framework:** Next.js 14 (App Router)
 - **Language:** TypeScript
 - **Styling:** Tailwind CSS + shadcn/ui
-- **Database:** Postgres (Neon recommended) + Drizzle ORM
+- **Historical storage:** Git-tracked JSON file
 - **Charts:** Recharts
 - **Deployment:** Vercel
 
@@ -34,97 +34,92 @@ Open [http://localhost:3000](http://localhost:3000) to view the app.
 Create a `.env.local` file for local development:
 
 ```env
-DATABASE_URL=
 GITHUB_TOKEN=
-CRON_SECRET=
 ```
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `DATABASE_URL` | Required for snapshots/backups | Postgres connection string. Neon is the recommended provider. |
-| `GITHUB_TOKEN` | Optional but recommended | Raises GitHub API limits for repo metrics and code search. |
-| `CRON_SECRET` | Required for cron/manual snapshot triggers | Bearer token used by `/api/cron/collect`. |
+| `GITHUB_TOKEN` | Optional but recommended | Raises GitHub API limits for repo metrics and the snapshot update workflow. |
+| `SNAPSHOTS_FILE_PATH` | Optional for tests/scripts | Overrides the default `data/snapshots.json` path. |
 
-## Database setup
+## Snapshot storage
 
-This project uses Drizzle ORM with Postgres. Neon is the intended hosted database.
+Historical data lives in the committed `data/snapshots.json` file. The dashboard reads that file at runtime for:
 
-```bash
-npm run db:push
+- trend charts from `/api/history`
+- the stored dependent-repository count shown on the home page
+- the `/api/snapshots` JSON endpoint
+
+The file shape is:
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-04-01T00:00:00.000Z",
+  "snapshots": [
+    {
+      "date": "2026-04-01",
+      "githubStars": 0,
+      "githubForks": 0,
+      "githubActiveForks": 0,
+      "githubContributors": 0,
+      "githubRepeatContributors": 0,
+      "githubDependentRepos": 0,
+      "npmDownloadsWeekly": null,
+      "pypiDownloadsWeekly": 0
+    }
+  ]
+}
 ```
 
-That creates the dashboard tables for the tracked repository and its daily snapshots.
+## Updating snapshots
 
-Additional database commands:
+Run the writer locally with:
 
 ```bash
-npm run db:generate
-npm run db:migrate
-npm run db:push
-npm run db:studio
+npm run snapshots:update
 ```
 
-## Daily snapshot collection
+The script fetches the current GitHub and PyPI metrics, upserts the current day in `data/snapshots.json`, and exits without touching the file when nothing changed.
 
-The dashboard collects one snapshot per day using `POST /api/cron/collect`.
+A manual verification flow looks like this:
+
+```bash
+npm run snapshots:update
+npm run snapshots:update
+```
+
+The second run should log that nothing changed for today.
+
+## Scheduled GitHub Actions workflow
+
+`.github/workflows/update-snapshots.yml` is the only automated writer for historical data.
 
 - **Schedule:** `0 6 * * *`
-- **Configured in:** `vercel.json`
-- **Behavior:** creates one snapshot per day and skips if a snapshot already exists
+- **Triggers:** scheduled run and `workflow_dispatch`
+- **Behavior:** runs `npm run snapshots:update`, commits `data/snapshots.json` only when it changed, and pushes the update back to the branch that triggered the workflow
 
-Manual trigger:
+### Pre-merge verification
 
-```bash
-curl -X POST http://localhost:3000/api/cron/collect \
-  -H "Authorization: Bearer $CRON_SECRET"
-```
-
-## Neon backup workflow
-
-This repository includes a lightweight Neon/Postgres backup flow:
-
-- `scripts/backup-neon.sh` creates a compressed `pg_dump` backup
-- `scripts/restore-neon.sh` restores a backup into a Postgres database
-- `.github/workflows/neon-backup.yml` runs the backup on a schedule and on manual dispatch
-- GitHub Actions uploads each backup as an artifact
-
-### Local backup
-
-Install the PostgreSQL client tools (`pg_dump` / `pg_restore`), then run:
-
-```bash
-DATABASE_URL=postgresql://... npm run backup:neon
-```
-
-By default the backup is written to `backups/openhands-dashboard-<timestamp>.dump`.
-
-### Local restore
-
-```bash
-DATABASE_URL=postgresql://... npm run restore:neon -- backups/openhands-dashboard-<timestamp>.dump
-```
-
-### GitHub Actions backup setup
-
-Add the following repository secret before enabling scheduled backups:
-
-- `DATABASE_URL` — the Neon production database URL
-
-The workflow installs `postgresql-client`, runs `scripts/backup-neon.sh`, and uploads the resulting dump as a workflow artifact.
+1. Push your feature branch.
+2. Run **Update Snapshots** with `workflow_dispatch` against that branch.
+3. Confirm the workflow updates `data/snapshots.json` or reports that no changes were needed.
+4. Verify the branch's Vercel preview renders the JSON-backed history correctly.
 
 ## Deployment
 
 1. Import the repository into Vercel.
-2. Set `DATABASE_URL`, `GITHUB_TOKEN`, and `CRON_SECRET` in Vercel project settings.
-3. Run `npm run db:push` against the production database.
-4. Deploy.
+2. Set `GITHUB_TOKEN` in Vercel project settings if you want higher GitHub API limits for live metrics.
+3. Deploy.
+
+Vercel now serves committed snapshot history from `data/snapshots.json`; there is no runtime database write path or Vercel cron dependency.
 
 ## Validation checklist
 
 After setup:
 
 - Home page links point to `OpenHands/OpenHands` and `openhands-ai`
-- `/api/cron/collect` creates or skips a snapshot successfully
-- Historical charts render once at least two snapshots exist
-- `npm run backup:neon` produces a `.dump` file locally
-- GitHub Actions backup artifacts are generated when the backup workflow runs
+- `npm run snapshots:update` creates or updates the current day's snapshot
+- A second `npm run snapshots:update` run is idempotent when metrics have not changed
+- Historical charts render once at least two snapshots exist in `data/snapshots.json`
+- The **Update Snapshots** workflow commits `data/snapshots.json` only when the file changed
